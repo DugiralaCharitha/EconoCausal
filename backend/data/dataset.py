@@ -57,10 +57,40 @@ def validate_customer_data(df: pd.DataFrame) -> None:
         raise ValueError("Revenue cannot be negative.")
 
 
+def prepare_causal_data(df: pd.DataFrame):
+    """Prepare features, treatment, and outcome for causal ML."""
+
+    feature_columns = [
+        "age",
+        "income",
+        "past_purchases",
+        "website_visits",
+        "customer_segment",
+        "previous_discount",
+    ]
+
+    X = df[feature_columns].copy()
+    T = df["discount"].copy()
+    Y = df["purchase"].copy()
+
+    X = pd.get_dummies(
+        X,
+        columns=["customer_segment"],
+        dtype=int,
+    )
+
+    return X, T, Y
 if __name__ == "__main__":
     customer_data = load_customer_data()
+
     validate_customer_data(customer_data)
+
+    X, T, Y = prepare_causal_data(customer_data)
 
     print("Dataset validation successful.")
     print(f"Rows: {len(customer_data)}")
-    print(f"Columns: {len(customer_data.columns)}")
+    print(f"Feature shape: {X.shape}")
+    print(f"Treatment shape: {T.shape}")
+    print(f"Outcome shape: {Y.shape}")
+    print("\nFeatures:")
+    print(X.head())
