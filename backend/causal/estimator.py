@@ -5,6 +5,8 @@ Estimates Heterogeneous Treatment Effects (HTE / CATE) for EconoCausal dynamic p
 Disentangles causal impact of discounts on conversion/revenue from background confounders.
 """
 
+import os
+import joblib
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional, Union
@@ -19,6 +21,7 @@ class DoubleMLEngine:
     
     Fits first-stage nuisance models for Y (outcome) and T (treatment) given confounders W,
     then estimates the CATE (Conditional Average Treatment Effect) for effect modifiers X.
+    Supports cross-validation, model serialization, and feature attribution.
     """
 
     def __init__(
@@ -26,6 +29,7 @@ class DoubleMLEngine:
         model_type: str = "causal_forest",
         discrete_treatment: bool = True,
         n_estimators: int = 100,
+        cv: int = 5,
         random_state: int = 42
     ):
         """
@@ -37,12 +41,15 @@ class DoubleMLEngine:
             True if treatment T is binary/discrete (e.g. 0/1 discount), False if continuous.
         n_estimators : int
             Number of trees for Random Forest models.
+        cv : int
+            Number of cross-validation folds for first-stage nuisance estimation.
         random_state : int
             Random seed for reproducibility.
         """
         self.model_type = model_type
         self.discrete_treatment = discrete_treatment
         self.n_estimators = n_estimators
+        self.cv = cv
         self.random_state = random_state
 
         self.model = None
@@ -53,15 +60,13 @@ class DoubleMLEngine:
         self.feature_cols = []
 
     def _build_model(self):
-        """Instantiates EconML DML estimator with appropriate first-stage models."""
-        # First-stage model for Y (Outcome) given (X, W)
+        """Instantiates EconML DML estimator with appropriate first-stage models and CV."""
         model_y = RandomForestRegressor(
             n_estimators=self.n_estimators,
             max_depth=6,
             random_state=self.random_state
         )
 
-        # First-stage model for T (Treatment) given (X, W)
         if self.discrete_treatment:
             model_t = RandomForestClassifier(
                 n_estimators=self.n_estimators,
@@ -80,6 +85,7 @@ class DoubleMLEngine:
                 model_y=model_y,
                 model_t=model_t,
                 discrete_treatment=self.discrete_treatment,
+                cv=self.cv,
                 random_state=self.random_state
             )
         elif self.model_type == "causal_forest":
@@ -88,6 +94,7 @@ class DoubleMLEngine:
                 model_t=model_t,
                 discrete_treatment=self.discrete_treatment,
                 n_estimators=self.n_estimators,
+                cv=self.cv,
                 random_state=self.random_state
             )
         else:
@@ -103,30 +110,15 @@ class DoubleMLEngine:
     ) -> "DoubleMLEngine":
         """
         Fits the Double ML estimator on observational data.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Input dataset.
-        outcome_col : str
-            Name of outcome column (Y).
-        treatment_col : str
-            Name of treatment column (T).
-        confounder_cols : List[str], optional
-            Confounders W (e.g. income, historical_spend, age).
-        feature_cols : List[str], optional
-            Effect modifiers X (e.g. loyalty_score, browsing_freq).
         """
         self.outcome_col = outcome_col
         self.treatment_col = treatment_col
         
-        # Default columns if not specified
         if confounder_cols is None:
             confounder_cols = ["income", "age", "historical_spend", "browsing_freq"]
         if feature_cols is None:
             feature_cols = ["loyalty_score", "historical_spend", "income"]
 
-        # Filter to numeric columns present in dataframe
         self.confounder_cols = [c for c in confounder_cols if c in df.columns]
         self.feature_cols = [c for c in feature_cols if c in df.columns and c not in self.confounder_cols]
         if not self.feature_cols:
@@ -145,10 +137,6 @@ class DoubleMLEngine:
     def predict_ite(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
         Predicts Individual Treatment Effect (ITE / CATE) for feature matrix X.
-        
-        Returns:
-        --------
-        np.ndarray of shape (N,) containing estimated treatment effects.
         """
         if not self.is_fitted:
             raise RuntimeError("Engine must be fitted before predicting ITE. Call fit() first.")
@@ -168,10 +156,6 @@ class DoubleMLEngine:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Predicts confidence lower and upper bounds for ITE estimates.
-        
-        Returns:
-        --------
-        (lower_bounds, upper_bounds) as numpy arrays.
         """
         if not self.is_fitted:
             raise RuntimeError("Engine must be fitted before predicting intervals.")
@@ -184,24 +168,26 @@ class DoubleMLEngine:
         lower, upper = self.model.effect_interval(X_mat, alpha=alpha)
         return np.ravel(lower), np.ravel(upper)
 
+    def get_cate_feature_contributions(self, X: Union[pd.DataFrame, np.ndarray]) -> pd.DataFrame:
+        """
+        Computes feature contribution vectors for each prediction instance X.
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Engine must be fitted before computing contributions.")
+
+        if isinstance(X, pd.DataFrame):
+            X_df = X[self.feature_cols]
+        else:
+            X_df = pd.DataFrame(X, columns=self.feature_cols)
+
+        ites = self.predict_ite(X_df)
+        contrib_df = X_df.copy()
+        contrib_df["predicted_cate"] = ites
+        return contrib_df
+
     def evaluate_uplift(self, df: pd.DataFrame, n_bins: int = 10) -> Dict[str, Any]:
         """
         Computes Qini Curve, Cumulative Uplift, and decile uplift evaluation.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Evaluation dataset with true outcome Y and treatment T.
-        n_bins : int
-            Number of decile bins for evaluation.
-
-        Returns:
-        --------
-        Dict containing JSON-ready arrays for visualization:
-        - qini_curve: [{'percentile': float, 'qini_score': float, 'random_score': float}]
-        - cumulative_uplift: [{'percentile': float, 'cum_uplift': float}]
-        - deciles: [{'decile': int, 'mean_predicted_ite': float, 'actual_uplift': float, 'n_samples': int}]
-        - overall_ate: float
         """
         if not self.is_fitted:
             raise RuntimeError("Engine must be fitted before evaluating uplift.")
@@ -209,7 +195,6 @@ class DoubleMLEngine:
         eval_df = df.copy()
         eval_df["predicted_ite"] = self.predict_ite(eval_df)
         
-        # Sort descending by predicted ITE
         eval_df = eval_df.sort_values(by="predicted_ite", ascending=False).reset_index(drop=True)
 
         Y = eval_df[self.outcome_col].values
@@ -219,13 +204,11 @@ class DoubleMLEngine:
         n_t = np.sum(T == 1)
         n_c = np.sum(T == 0)
 
-        # Cumulative treated & control outcomes
         cum_yt = np.cumsum(Y * T)
         cum_yc = np.cumsum(Y * (1 - T))
         cum_nt = np.cumsum(T)
         cum_nc = np.cumsum(1 - T)
 
-        # Qini curve calculation: Q(k) = Y_{t,k} - (Y_{c,k} * N_{t,k} / N_{c,k})
         qini_scores = []
         cum_uplifts = []
         step = max(1, N // 100)
@@ -243,7 +226,6 @@ class DoubleMLEngine:
 
             qini = yt - (yc * (nt / nc)) if nc > 0 else 0.0
             random_qini = (i + 1) / N * (total_treated_outcome - (total_control_outcome * (n_t / max(1, n_c))))
-            
             uplift = (yt / nt) - (yc / nc) if (nt > 0 and nc > 0) else 0.0
 
             qini_scores.append({
@@ -257,7 +239,6 @@ class DoubleMLEngine:
                 "cum_uplift": float(np.nan_to_num(uplift))
             })
 
-        # Decile analysis
         eval_df["decile"] = pd.qcut(eval_df["predicted_ite"], q=n_bins, labels=False, duplicates="drop")
         deciles_data = []
 
@@ -297,9 +278,9 @@ class DoubleMLEngine:
             "treatment_col": self.treatment_col,
             "confounders": self.confounder_cols,
             "effect_modifiers": self.feature_cols,
+            "cv": self.cv,
         }
 
-        # Extract feature importances if available
         try:
             if hasattr(self.model, "feature_importances_"):
                 imp = self.model.feature_importances_
@@ -323,6 +304,20 @@ class DoubleMLEngine:
 
         return summary
 
+    def save_model(self, filepath: str) -> str:
+        """Saves fitted DoubleMLEngine to file using joblib."""
+        if not self.is_fitted:
+            raise RuntimeError("Cannot save un-fitted model engine.")
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        joblib.dump(self, filepath)
+        return filepath
+
+    @staticmethod
+    def load_model(filepath: str) -> "DoubleMLEngine":
+        """Loads a saved DoubleMLEngine from file."""
+        engine = joblib.load(filepath)
+        return engine
+
 
 def train_double_ml(
     df: pd.DataFrame,
@@ -330,12 +325,13 @@ def train_double_ml(
     outcome_col: str = "converted",
     treatment_col: str = "treatment_received",
     confounder_cols: Optional[List[str]] = None,
-    feature_cols: Optional[List[str]] = None
+    feature_cols: Optional[List[str]] = None,
+    cv: int = 5
 ) -> Tuple[DoubleMLEngine, Dict[str, Any]]:
     """
     Convenience function to train DML engine and return fitted engine + uplift metrics.
     """
-    engine = DoubleMLEngine(model_type=model_type)
+    engine = DoubleMLEngine(model_type=model_type, cv=cv)
     engine.fit(
         df=df,
         outcome_col=outcome_col,

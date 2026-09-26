@@ -73,14 +73,12 @@ def test_evaluate_uplift(synthetic_data):
     assert "overall_ate" in metrics
     assert "mean_predicted_ite" in metrics
 
-    # Verify Qini curve structure
     assert len(metrics["qini_curve"]) > 0
     q_first = metrics["qini_curve"][0]
     assert "percentile" in q_first
     assert "qini_score" in q_first
     assert "random_score" in q_first
 
-    # Verify deciles structure
     assert len(metrics["deciles"]) <= 5
     d_first = metrics["deciles"][0]
     assert "decile" in d_first
@@ -98,3 +96,28 @@ def test_train_double_ml_convenience_wrapper(synthetic_data):
     summary = engine.get_model_summary()
     assert summary["fitted"] is True
     assert summary["model_type"] == "causal_forest"
+
+
+def test_double_ml_serialization_and_contributions(synthetic_data, tmp_path):
+    """Test joblib save/load serialization and CATE feature attribution dataframe."""
+    df = synthetic_data
+    engine = DoubleMLEngine(model_type="causal_forest", n_estimators=40, cv=3, random_state=42)
+    engine.fit(df=df)
+
+    # Test feature contributions
+    contrib_df = engine.get_cate_feature_contributions(df.head(10))
+    assert "predicted_cate" in contrib_df.columns
+    assert len(contrib_df) == 10
+
+    # Test serialization
+    model_file = str(tmp_path / "dml_engine.joblib")
+    saved_path = engine.save_model(model_file)
+    assert saved_path == model_file
+
+    loaded_engine = DoubleMLEngine.load_model(model_file)
+    assert loaded_engine.is_fitted is True
+    
+    # Predict with loaded model
+    original_preds = engine.predict_ite(df.head(5))
+    loaded_preds = loaded_engine.predict_ite(df.head(5))
+    np.testing.assert_allclose(original_preds, loaded_preds)
