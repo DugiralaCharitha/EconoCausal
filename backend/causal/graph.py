@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Tuple, Optional
 class CausalGraphBuilder:
     """
     Builds and manages Causal DAG specifications for DoWhy and frontend visualization.
+    Supports DOT notation, Mermaid JS syntax, and backdoor path analysis.
     """
 
     def __init__(
@@ -49,9 +50,55 @@ class CausalGraphBuilder:
         dot_str = "digraph {\n" + ";\n".join(edges) + ";\n}"
         return dot_str
 
+    def build_mermaid_graph(self) -> str:
+        """
+        Generate Mermaid JS flowchart string for React/Markdown graph rendering.
+        """
+        lines = ["graph TD"]
+        
+        # Styles
+        lines.append("    classDef confounder fill:#f9f,stroke:#333,stroke-width:1px;")
+        lines.append("    classDef modifier fill:#bbf,stroke:#333,stroke-width:1px;")
+        lines.append("    classDef treatment fill:#bfb,stroke:#333,stroke-width:2px;")
+        lines.append("    classDef outcome fill:#fbb,stroke:#333,stroke-width:2px;")
+
+        # Nodes
+        for conf in self.confounder_names:
+            lines.append(f'    {conf}["{conf} (Confounder)"]:::confounder')
+        for mod in self.effect_modifier_names:
+            lines.append(f'    {mod}["{mod} (Modifier)"]:::modifier')
+            
+        lines.append(f'    {self.treatment_name}["{self.treatment_name} (Treatment T)"]:::treatment')
+        lines.append(f'    {self.outcome_name}["{self.outcome_name} (Outcome Y)"]:::outcome')
+
+        # Edges
+        for conf in self.confounder_names:
+            lines.append(f'    {conf} --> {self.treatment_name}')
+            lines.append(f'    {conf} --> {self.outcome_name}')
+
+        for mod in self.effect_modifier_names:
+            lines.append(f'    {mod} --> {self.outcome_name}')
+
+        lines.append(f'    {self.treatment_name} ==>|Causal Effect| {self.outcome_name}')
+
+        return "\n".join(lines)
+
+    def get_confounder_backdoor_paths(self) -> List[Dict[str, str]]:
+        """
+        Lists identified backdoor paths blocked by conditioning on confounders W.
+        """
+        paths = []
+        for conf in self.confounder_names:
+            paths.append({
+                "confounder": conf,
+                "backdoor_path": f"{self.treatment_name} <- {conf} -> {self.outcome_name}",
+                "status": "blocked_when_conditioned"
+            })
+        return paths
+
     def get_graph_metadata(self) -> Dict[str, Any]:
         """
-        Returns JSON-serializable graph nodes and edges for UI visualization (React/Plotly).
+        Returns JSON-serializable graph nodes and edges for UI visualization (React/Plotly/Mermaid).
         """
         nodes = []
         
@@ -101,6 +148,8 @@ class CausalGraphBuilder:
             "nodes": nodes,
             "edges": edges,
             "dot": self.build_dot_graph(),
+            "mermaid": self.build_mermaid_graph(),
+            "backdoor_paths": self.get_confounder_backdoor_paths(),
             "summary": {
                 "treatment": self.treatment_name,
                 "outcome": self.outcome_name,
