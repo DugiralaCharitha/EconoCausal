@@ -6,7 +6,7 @@ import pytest
 import pandas as pd
 from backend.data.generator import generate_retail_data
 from backend.causal.graph import create_retail_causal_graph
-from backend.causal.audit import CausalRefutationAuditor
+from backend.causal.audit import CausalRefutationAuditor, audit_causal_model
 
 
 @pytest.fixture
@@ -58,3 +58,30 @@ def test_data_subset_refutation(sample_causal_setup):
     assert "passed" in result
     assert result["test_name"] == "Data Subset Refuter"
     assert result["subset_fraction"] == 0.8
+
+
+def test_full_audit_suite_and_markdown_report(sample_causal_setup):
+    """Test run_full_audit_suite composite reliability score and markdown formatting."""
+    dowhy_model, identified_estimand, estimate, _ = sample_causal_setup
+    auditor = CausalRefutationAuditor(random_state=42)
+    
+    suite_summary = auditor.run_full_audit_suite(dowhy_model, identified_estimand, estimate, num_simulations=3)
+
+    assert "causal_reliability_score" in suite_summary
+    assert "reliability_status" in suite_summary
+    assert suite_summary["tests_passed"] >= 2
+    assert suite_summary["total_tests"] == 3
+
+    markdown_report = auditor.get_markdown_audit_report()
+    assert "Refutation Audit Report" in markdown_report
+    assert "Placebo Treatment Refuter" in markdown_report
+
+
+def test_audit_causal_model_wrapper():
+    """Test convenience wrapper audit_causal_model."""
+    df = generate_retail_data(n_samples=300, seed=42)
+    estimate, summary = audit_causal_model(df, num_simulations=2)
+
+    assert estimate is not None
+    assert "causal_reliability_score" in summary
+    assert summary["causal_reliability_score"] >= 60.0
