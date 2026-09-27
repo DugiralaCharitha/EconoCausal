@@ -27,7 +27,7 @@ class CausalGraphBuilder:
         self.treatment_name = treatment_name
         self.outcome_name = outcome_name
         self.confounder_names = confounder_names or ["income", "age", "historical_spend", "browsing_freq"]
-        self.effect_modifier_names = effect_modifier_names or ["loyalty_score", "user_segment"]
+        self.effect_modifier_names = effect_modifier_names or ["loyalty_score", "browsing_freq"]
 
     def build_dot_graph(self) -> str:
         """
