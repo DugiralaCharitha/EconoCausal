@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from backend.data.generator import generate_retail_data
 from backend.causal.estimator import DoubleMLEngine
-from backend.optimization.solver import PrescriptiveBudgetOptimizer
+from backend.optimization.solver import PrescriptiveBudgetOptimizer, solve_optimal_budget
 
 
 @pytest.fixture
@@ -53,3 +53,39 @@ def test_zero_budget_constraint(fitted_causal_setup):
 
     assert result["budget_spent"] == 0.0
     assert result["discount_distribution"].get("0.0", 0) == len(df)
+
+
+def test_compare_against_baselines(fitted_causal_setup):
+    """Test baseline benchmarking comparisons (Causal vs Blanket vs Zero)."""
+    df, engine = fitted_causal_setup
+    optimizer = PrescriptiveBudgetOptimizer()
+
+    benchmarks = optimizer.compare_against_baselines(df, engine, total_budget=1500.0)
+
+    assert "prescriptive_causal" in benchmarks
+    assert "blanket_targeting" in benchmarks
+    assert "no_discount_baseline" in benchmarks
+    assert benchmarks["prescriptive_causal"]["net_profit"] >= benchmarks["blanket_targeting"]["net_profit"]
+
+
+def test_simulate_budget_sensitivity(fitted_causal_setup):
+    """Test budget sensitivity grid curve generation."""
+    df, engine = fitted_causal_setup
+    optimizer = PrescriptiveBudgetOptimizer()
+
+    curve = optimizer.simulate_budget_sensitivity(df, engine, budget_grid=[500, 1500, 3000])
+
+    assert len(curve) == 3
+    assert curve[0]["budget_limit"] == 500
+    assert curve[2]["budget_limit"] == 3000
+    assert "roi_multiplier" in curve[0]
+
+
+def test_solve_optimal_budget_wrapper(fitted_causal_setup):
+    """Test solve_optimal_budget convenience function."""
+    df, engine = fitted_causal_setup
+    res = solve_optimal_budget(df, engine, total_budget=1000.0)
+
+    assert "optimization" in res
+    assert "benchmarks" in res
+    assert res["optimization"]["budget_spent"] <= 1000.0

@@ -3,12 +3,12 @@ Prescriptive Optimization Engine using SciPy.
 
 Solves budget-constrained personalized discount allocation to maximize campaign net profit
 and ROI using Double Machine Learning (DML) CATE/ITE estimates.
+Includes baseline benchmarking and budget sensitivity curve analysis.
 """
 
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional
-from scipy.optimize import minimize, linprog
 from backend.causal.estimator import DoubleMLEngine
 
 
@@ -32,25 +32,6 @@ class PrescriptiveBudgetOptimizer:
     ) -> Dict[str, Any]:
         """
         Solves optimal discrete discount assignment per customer under total budget B constraint.
-
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            Customer dataset.
-        dml_engine : DoubleMLEngine
-            Fitted Double ML engine to predict CATE/ITE.
-        total_budget : float
-            Total marketing campaign budget ceiling ($B$).
-        margin_per_order : float
-            Gross profit margin per converted purchase before discount.
-        max_discount : float
-            Maximum allowed discount amount per customer.
-        discount_options : List[float], optional
-            Available discount tiers, defaults to [0.0, 5.0, 10.0, 15.0, 20.0].
-
-        Returns:
-        --------
-        Dict containing allocation summary, optimal assignments, and revenue metrics.
         """
         if discount_options is None:
             discount_options = [0.0, 5.0, 10.0, 15.0, 20.0]
@@ -59,11 +40,9 @@ class PrescriptiveBudgetOptimizer:
 
         N = len(df)
         predicted_ite = dml_engine.predict_ite(df)
-        
         baseline_prob = df["baseline_prob"].values if "baseline_prob" in df.columns else np.full(N, 0.20)
 
-        # Build payoff matrix: Net Expected Revenue for each customer i and discount d_j
-        # Net Profit = (BaselineProb + ITE*(d_j/20)) * Margin - d_j
+        # Payoff matrix: Net Expected Revenue = (BaselineProb + ITE*(disc/20)) * Margin - disc
         payoff_matrix = np.zeros((N, len(discount_options)))
         cost_matrix = np.zeros((N, len(discount_options)))
 
@@ -75,12 +54,9 @@ class PrescriptiveBudgetOptimizer:
             payoff_matrix[:, j] = net_profit
             cost_matrix[:, j] = disc
 
-        # Greedy / Knapsack optimization for discrete tier selection under total budget B
-        # Baseline choice: 0 discount
         chosen_option = np.zeros(N, dtype=int)
         current_budget_spent = 0.0
 
-        # Gain from upgrading from 0 discount to higher tier per dollar spent
         upgrades = []
         for i in range(N):
             base_profit = payoff_matrix[i, 0]
@@ -91,7 +67,6 @@ class PrescriptiveBudgetOptimizer:
                     efficiency = profit_gain / cost
                     upgrades.append((efficiency, profit_gain, cost, i, j))
 
-        # Sort upgrades by efficiency (ROI per dollar spent) descending
         upgrades.sort(key=lambda x: x[0], reverse=True)
 
         for eff, profit_gain, cost, i, j in upgrades:
@@ -103,12 +78,10 @@ class PrescriptiveBudgetOptimizer:
         optimal_net_profit = sum(payoff_matrix[i, chosen_option[i]] for i in range(N))
         baseline_net_profit = sum(payoff_matrix[i, 0] for i in range(N))
 
-        # Categorize customer personas based on assignment
         assigned_personas = []
         for i in range(N):
             bp = baseline_prob[i]
             ite_val = predicted_ite[i]
-            disc_given = optimal_discounts[i]
 
             if bp >= 0.45:
                 assigned_personas.append("Organic Buyer")
@@ -135,3 +108,100 @@ class PrescriptiveBudgetOptimizer:
             "discount_distribution": {str(k): int(v) for k, v in discount_distrib.items()},
             "persona_breakdown": persona_counts
         }
+
+    def compare_against_baselines(
+        self,
+        df: pd.DataFrame,
+        dml_engine: DoubleMLEngine,
+        total_budget: float = 10000.0,
+        margin_per_order: float = 50.0
+    ) -> Dict[str, Any]:
+        """
+        Benchmarks Prescriptive Causal Optimization against Blanket and Random strategies.
+        """
+        N = len(df)
+        opt_res = self.optimize_discounts(df, dml_engine, total_budget, margin_per_order)
+
+        # 1. Blanket Strategy: $10 to everyone until budget runs out
+        blanket_discounts = np.zeros(N)
+        b_spent = 0.0
+        for i in range(N):
+            if b_spent + 10.0 <= total_budget:
+                blanket_discounts[i] = 10.0
+                b_spent += 10.0
+
+        # 2. Zero Discount Baseline
+        zero_discounts = np.zeros(N)
+
+        predicted_ite = dml_engine.predict_ite(df)
+        baseline_prob = df["baseline_prob"].values if "baseline_prob" in df.columns else np.full(N, 0.20)
+
+        def calc_profit(discounts):
+            conversions = np.clip(baseline_prob + predicted_ite * (discounts / 20.0), 0.0, 0.99)
+            return float(np.sum((conversions * margin_per_order) - discounts))
+
+        opt_profit = opt_res["optimal_net_profit"]
+        blanket_profit = calc_profit(blanket_discounts)
+        zero_profit = calc_profit(zero_discounts)
+
+        return {
+            "prescriptive_causal": {
+                "strategy": "Prescriptive Causal Optimization",
+                "budget_spent": opt_res["budget_spent"],
+                "net_profit": round(opt_profit, 2),
+                "profit_lift_vs_zero": round(opt_profit - zero_profit, 2)
+            },
+            "blanket_targeting": {
+                "strategy": "Blanket $10 Discounting",
+                "budget_spent": round(b_spent, 2),
+                "net_profit": round(blanket_profit, 2),
+                "profit_lift_vs_zero": round(blanket_profit - zero_profit, 2)
+            },
+            "no_discount_baseline": {
+                "strategy": "Organic Baseline ($0 spend)",
+                "budget_spent": 0.0,
+                "net_profit": round(zero_profit, 2),
+                "profit_lift_vs_zero": 0.0
+            },
+            "causal_outperformance_vs_blanket": round(opt_profit - blanket_profit, 2)
+        }
+
+    def simulate_budget_sensitivity(
+        self,
+        df: pd.DataFrame,
+        dml_engine: DoubleMLEngine,
+        budget_grid: Optional[List[float]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Evaluates profit and ROI across a grid of budget levels to find saturation point.
+        """
+        if budget_grid is None:
+            budget_grid = [1000, 2500, 5000, 7500, 10000, 15000, 20000]
+
+        curve = []
+        for b in budget_grid:
+            res = self.optimize_discounts(df, dml_engine, total_budget=b)
+            curve.append({
+                "budget_limit": b,
+                "budget_spent": res["budget_spent"],
+                "optimal_net_profit": res["optimal_net_profit"],
+                "profit_lift": res["profit_lift"],
+                "roi_multiplier": round(res["profit_lift"] / max(1.0, res["budget_spent"]), 2)
+            })
+
+        return curve
+
+
+def solve_optimal_budget(
+    df: pd.DataFrame,
+    dml_engine: DoubleMLEngine,
+    total_budget: float = 10000.0
+) -> Dict[str, Any]:
+    """Convenience helper to optimize discounts and benchmark against baselines."""
+    optimizer = PrescriptiveBudgetOptimizer()
+    opt_summary = optimizer.optimize_discounts(df, dml_engine, total_budget=total_budget)
+    benchmarks = optimizer.compare_against_baselines(df, dml_engine, total_budget=total_budget)
+    return {
+        "optimization": opt_summary,
+        "benchmarks": benchmarks
+    }
