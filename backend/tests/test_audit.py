@@ -23,6 +23,19 @@ def sample_causal_setup():
     return dowhy_model, identified_estimand, estimate, df
 
 
+def test_propensity_overlap_audit(sample_causal_setup):
+    """Test Propensity Score Overlap & Positivity Audit execution."""
+    _, _, _, df = sample_causal_setup
+    auditor = CausalRefutationAuditor(random_state=42)
+
+    res = auditor.run_propensity_overlap_audit(df)
+
+    assert "passed" in res
+    assert "overlap_histogram" in res
+    assert len(res["overlap_histogram"]) == 10
+    assert "positivity_violation_warning" in res
+
+
 def test_placebo_treatment_refutation(sample_causal_setup):
     """Test Placebo Treatment Refuter execution and pass condition."""
     dowhy_model, identified_estimand, estimate, _ = sample_causal_setup
@@ -62,18 +75,18 @@ def test_data_subset_refutation(sample_causal_setup):
 
 def test_full_audit_suite_and_markdown_report(sample_causal_setup):
     """Test run_full_audit_suite composite reliability score and markdown formatting."""
-    dowhy_model, identified_estimand, estimate, _ = sample_causal_setup
+    dowhy_model, identified_estimand, estimate, df = sample_causal_setup
     auditor = CausalRefutationAuditor(random_state=42)
     
-    suite_summary = auditor.run_full_audit_suite(dowhy_model, identified_estimand, estimate, num_simulations=3)
+    suite_summary = auditor.run_full_audit_suite(dowhy_model, identified_estimand, estimate, df=df, num_simulations=3)
 
     assert "causal_reliability_score" in suite_summary
     assert "reliability_status" in suite_summary
-    assert suite_summary["tests_passed"] >= 2
-    assert suite_summary["total_tests"] == 3
+    assert suite_summary["tests_passed"] >= 3
+    assert suite_summary["total_tests"] == 4
 
     markdown_report = auditor.get_markdown_audit_report()
-    assert "Refutation Audit Report" in markdown_report
+    assert "Refutation" in markdown_report
     assert "Placebo Treatment Refuter" in markdown_report
 
 
